@@ -79,3 +79,24 @@ If you want to pull diagnostic data from a broken target IP.
 ```bash
 python3 test_pg_chaos.py --collect-logs --vm-ip 10.83.30.177
 ```
+
+**4. Playing the AI Wargame (Symmetric Mode)**
+Run a 3-turn Wargame where both the attacker and defender use the exact same model. The script will fuzzy match "mixtral" to your local Ollama tags.
+*(Precondition: The VM must have already been provisioned and set up via `--setup`)*
+```bash
+python3 test_pg_chaos.py --agentchaos --turns 3 --model mixtral
+```
+
+**5. Playing the AI Wargame (Asymmetric Mode)**
+Pit a smaller, faster model (e.g. `llama3`) against a heavy model (e.g. `mixtral`) to see if the heavy model can fix what the fast model breaks.
+```bash
+python3 test_pg_chaos.py --agentchaos --turns 5 --blackhat-model llama3 --whitehat-model mixtral
+```
+
+### What to Expect in the Wargame
+1. **Pre-flight**: The script will verify that Juju is installed and `site1` is deployed.
+2. **Wake Up**: It will quietly ping the requested models in Ollama to load them into memory to prevent timeouts.
+3. **BlackHat Turn**: The attacker will generate a destructive Juju command. If it takes longer than 60 seconds to execute, it is forcefully killed.
+4. **WhiteHat Turn**: The defender is given the current `juju status` and asked to recover. It generates repair commands, which are also bound by a 60s timeout.
+5. **Trash Talk**: Both models will exchange a 1-sentence banter.
+6. **Evaluation**: After all turns, the script checks the `juju status` JSON. If any unit is broken, BlackHat wins. If all are active and idle, WhiteHat wins!
