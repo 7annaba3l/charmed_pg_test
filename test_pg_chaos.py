@@ -223,12 +223,10 @@ juju add-model site1 || true
 juju deploy postgresql db1 --channel 16/stable --config profile={profile} --base ubuntu@24.04 || true
 juju deploy data-integrator di1 --config database-name=testdb --base ubuntu@24.04 || true
 juju relate db1 di1 || true
-juju add-unit db1 -n 1 || true
 juju config db1 synchronous-mode-strict=false
 juju offer db1:replication-offer replication-offer || true
 juju add-model site2 || true
 juju deploy postgresql db2 --channel 16/stable --config profile={profile} --base ubuntu@24.04 || true
-juju add-unit db2 -n 1 || true
 juju config db2 synchronous-mode-strict=false
 sleep 10
 juju consume site1.replication-offer || true
@@ -303,7 +301,9 @@ def wait_for_active(model_name, app_name=""):
                     
                 for unit_name, unit_data in units.items():
                     workload_status = unit_data.get("workload-status", {}).get("current", "unknown")
-                    agent_status = unit_data.get("agent-status", {}).get("current", "unknown")
+                    # In newer Juju versions (3.6+), agent-status is named juju-status
+                    juju_status_obj = unit_data.get("juju-status") or unit_data.get("agent-status") or {}
+                    agent_status = juju_status_obj.get("current", "unknown")
                     
                     if workload_status != "active" or agent_status != "idle":
                         all_active = False
@@ -709,8 +709,19 @@ if __name__ == "__main__":
             # Enable debug logging
             run_remote("juju model-config -m site1 logging-config='<root>=INFO;unit=DEBUG'")
             run_remote("juju model-config -m site2 logging-config='<root>=INFO;unit=DEBUG'")
+            
+            # Wait for the first units to deploy fully before scaling out
             wait_for_active("site1", "db1")
             wait_for_active("site2", "db2")
+            
+            print("[*] Primary clusters ready. Scaling out secondary units...")
+            run_remote("juju add-unit db1 -n 1 -m site1")
+            run_remote("juju add-unit db2 -n 1 -m site2")
+            
+            # Wait for the newly added units to deploy fully
+            wait_for_active("site1", "db1")
+            wait_for_active("site2", "db2")
+            
         if args.baseline:
             creds = get_credentials_and_ips()
             baseline_validation(creds)
