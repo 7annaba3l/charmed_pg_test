@@ -49,9 +49,9 @@ def run_sysbench_workloads(creds, test_name):
     
     print("Workloads started in background.")
 
-def setup_infrastructure():
-    print("Setting up infrastructure...")
-    script = """
+def setup_infrastructure(profile):
+    print(f"Setting up infrastructure with profile {profile}...")
+    script = f"""
     sudo apt -y update && sudo apt -y upgrade
     sudo snap install juju --channel=3.6/stable
     sudo snap install lxd --channel=5.21/stable
@@ -60,14 +60,14 @@ def setup_infrastructure():
     sudo iptables -P FORWARD ACCEPT
     juju bootstrap localhost localhost || true
     juju add-model site1 || true
-    juju deploy postgresql db1 --channel 16/stable --config profile=testing --base ubuntu@24.04 || true
+    juju deploy postgresql db1 --channel 16/stable --config profile={profile} --base ubuntu@24.04 || true
     juju deploy data-integrator di1 --config database-name=testdb --base ubuntu@24.04 || true
     juju relate db1 di1 || true
     juju add-unit db1 -n 1 || true
     juju config db1 synchronous-mode-strict=false
     juju offer db1:replication-offer replication-offer || true
     juju add-model site2 || true
-    juju deploy postgresql db2 --channel 16/stable --config profile=testing --base ubuntu@24.04 || true
+    juju deploy postgresql db2 --channel 16/stable --config profile={profile} --base ubuntu@24.04 || true
     juju add-unit db2 -n 1 || true
     juju config db2 synchronous-mode-strict=false
     sleep 10
@@ -79,13 +79,12 @@ def setup_infrastructure():
         if line.strip():
             run_remote(line.strip(), capture=False)
 
-def wait_for_active():
-    print("Waiting for deployments to settle...")
+def wait_for_active(model_name, app_name=""):
+    print(f"Waiting for {app_name} in {model_name} to settle...")
     while True:
-        s1 = run_remote("juju status -m site1 --format=json")
-        s2 = run_remote("juju status -m site2 --format=json")
-        if "maintenance" not in s1 and "maintenance" not in s2 and "allocating" not in s2:
-            print("Deployments active.")
+        status = run_remote(f"juju status -m {model_name} --format=json")
+        if status and '"status": "maintenance"' not in status and '"status": "waiting"' not in status and '"status": "allocating"' not in status:
+            print(f"Deployments in {model_name} are active.")
             break
         print("Still waiting...")
         time.sleep(15)
@@ -146,41 +145,47 @@ def test_replication_creation(creds):
     time.sleep(SYSBENCH_TIME)
     print("Expected: Replication is established under load")
 
-def test_upgrade_site2(creds):
+def test_upgrade_site2(creds, target_branch):
     print("\n--- Test: Upgrade site2 ---")
     run_sysbench_workloads(creds, "upg_site2")
     time.sleep(10)
     run_remote("juju run db2/leader pre-refresh-check -m site2 || true")
-    run_remote("juju refresh db2 --channel 16/edge -m site2")
+    run_remote(f"juju refresh db2 --channel 16/{target_branch} -m site2")
+    time.sleep(15)
+    wait_for_active("site2")
     # Determine unit numbers dynamically
     s2 = run_remote("juju status -m site2")
     units = re.findall(r"db2/(\d+)", s2)
     for u in reversed(units):  # usually standbys first
         run_remote(f"juju run db2/{u} resume-refresh -m site2 || true")
-        time.sleep(30)
+        time.sleep(15)
+        wait_for_active("site2")
     time.sleep(SYSBENCH_TIME)
     print("Expected: E fails then D fails separately. Others function.")
 
-def test_upgrade_site1(creds):
+def test_upgrade_site1(creds, target_branch):
     print("\n--- Test: Upgrade site1 ---")
     run_sysbench_workloads(creds, "upg_site1")
     time.sleep(10)
     run_remote("juju run db1/leader pre-refresh-check -m site1 || true")
-    run_remote("juju refresh db1 --channel 16/edge -m site1")
+    run_remote(f"juju refresh db1 --channel 16/{target_branch} -m site1")
+    time.sleep(15)
+    wait_for_active("site1")
     s1 = run_remote("juju status -m site1")
     units = re.findall(r"db1/(\d+)", s1)
     for u in reversed(units):
         run_remote(f"juju run db1/{u} resume-refresh -m site1 || true")
-        time.sleep(30)
+        time.sleep(15)
+        wait_for_active("site1")
     time.sleep(SYSBENCH_TIME)
     print("Expected: C fails then A+B fail separately. Primary switches once.")
 
-def test_watcher_addition(creds):
+def test_watcher_addition(creds, target_branch, profile):
     print("\n--- Test: Watcher addition ---")
     run_sysbench_workloads(creds, "watch_add")
     time.sleep(10)
-    run_remote("juju deploy postgresql-watcher w1 --channel 16/edge --config profile=testing --base ubuntu@24.04 -m site1 || true")
-    run_remote("juju deploy postgresql-watcher w2 --channel 16/edge --config profile=testing --base ubuntu@24.04 -m site2 || true")
+    run_remote(f"juju deploy postgresql-watcher w1 --channel 16/{target_branch} --config profile={profile} --base ubuntu@24.04 -m site1 || true")
+    run_remote(f"juju deploy postgresql-watcher w2 --channel 16/{target_branch} --config profile={profile} --base ubuntu@24.04 -m site2 || true")
     run_remote("juju relate db1 w1 -m site1 || true")
     run_remote("juju relate db2 w2 -m site2 || true")
     time.sleep(SYSBENCH_TIME)
@@ -230,13 +235,13 @@ def test_abrupt_shutdown(creds):
     run_remote(f"juju remove-unit db1/{mach_id} -m site1 || true")
     run_remote("juju add-unit db1 -n 1 -m site1")
 
-def run_chaos_tests():
+def run_chaos_tests(branch, profile):
     init_tmux()
     creds = get_credentials_and_ips()
     test_replication_creation(creds)
-    test_upgrade_site2(creds)
-    test_upgrade_site1(creds)
-    test_watcher_addition(creds)
+    test_upgrade_site2(creds, branch)
+    test_upgrade_site1(creds, branch)
+    test_watcher_addition(creds, branch, profile)
     test_units_addition(creds)
     test_node_loss(creds)
     test_abrupt_shutdown(creds)
@@ -247,6 +252,8 @@ if __name__ == "__main__":
     parser.add_argument("--setup", action="store_true", help="Run setup phase")
     parser.add_argument("--baseline", action="store_true", help="Run baseline preparation")
     parser.add_argument("--test", action="store_true", help="Run chaos tests")
+    parser.add_argument("--branch", choices=["stable", "candidate", "beta", "edge"], default="edge", help="The branch to use for PostgreSQL upgrades and watchers (default: edge)")
+    parser.add_argument("--profile", choices=["testing", "production"], default="testing", help="The profile config to use (default: testing)")
     args = parser.parse_args()
 
     if len(sys.argv) == 1:
@@ -254,10 +261,11 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if args.setup:
-        setup_infrastructure()
-        wait_for_active()
+        setup_infrastructure(args.profile)
+        wait_for_active("site1", "db1")
+        wait_for_active("site2", "db2")
     if args.baseline:
         creds = get_credentials_and_ips()
         baseline_validation(creds)
     if args.test:
-        run_chaos_tests()
+        run_chaos_tests(args.branch, args.profile)
