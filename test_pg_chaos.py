@@ -9,6 +9,8 @@ import os
 import datetime
 import traceback
 import argparse
+import urllib.request
+import urllib.error
 
 SSH_CMD = []
 TMUX_SESSION = "pg_tests"
@@ -474,11 +476,162 @@ def run_chaos_tests(branch, profile):
     test_abrupt_shutdown(creds)
     print("All tests completed.")
 
+def get_ollama_models():
+    try:
+        req = urllib.request.Request("http://localhost:11434/v1/models", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            return [m["id"] for m in data.get("data", [])]
+    except Exception as e:
+        print(f"[-] Failed to fetch models from v1/models: {e}")
+        return []
+
+def query_llm(model, system_prompt, user_prompt, timeout=120):
+    url = "http://localhost:11434/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.7
+    }
+    
+    req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = json.loads(response.read().decode())
+            return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[-] LLM query failed: {e}")
+        return ""
+
+def validate_juju_cmd(cmd_raw):
+    # Strip backticks, quotes, and whitespace
+    cmd = cmd_raw.strip('`"\' \n\t')
+    if cmd.startswith("bash"): cmd = cmd[4:].strip()
+    if cmd.startswith("sh"): cmd = cmd[2:].strip()
+    
+    cmds = [c.strip() for c in cmd.split("&&")]
+    valid_cmds = []
+    for c in cmds:
+        if c.startswith("juju "):
+            valid_cmds.append(c)
+        else:
+            print(f"[-] Invalid non-juju command blocked: {c}")
+    
+    return " && ".join(valid_cmds) if valid_cmds else None
+
+def execute_with_timeout(cmd, timeout=60):
+    full_cmd = SSH_CMD + [cmd]
+    try:
+        subprocess.run(full_cmd, timeout=timeout, check=True, capture_output=True)
+    except subprocess.TimeoutExpired:
+        print(f"[-] Execution timed out after {timeout} seconds! Turn forcefully ended.")
+    except subprocess.CalledProcessError as e:
+        print(f"[-] Execution failed with exit code {e.returncode}: {e.stderr.decode('utf-8', errors='ignore').strip() if e.stderr else 'Unknown Error'}")
+
+def run_agent_chaos(turns, blackhat_model, whitehat_model):
+    print(f"\n{'='*50}\n[*] INITIALIZING AI WARGAME\n{'='*50}")
+    
+    models = get_ollama_models()
+    if not models:
+        print("[-] No models found on localhost:11434. Please ensure Ollama is running.")
+        sys.exit(1)
+        
+    bh_model = blackhat_model if blackhat_model else models[0]
+    wh_model = whitehat_model if whitehat_model else models[0]
+    
+    if bh_model not in models:
+        print(f"[-] Warning: BlackHat model '{bh_model}' not found in local API.")
+    if wh_model not in models:
+        print(f"[-] Warning: WhiteHat model '{wh_model}' not found in local API.")
+        
+    print(f"[*] BlackHat Model: {bh_model}")
+    print(f"[*] WhiteHat Model: {wh_model}")
+    
+    print("[*] Pre-loading models into memory...")
+    query_llm(bh_model, "You are a helpful assistant.", "Wake up.", timeout=120)
+    query_llm(wh_model, "You are a helpful assistant.", "Wake up.", timeout=120)
+    
+    for turn in range(1, turns + 1):
+        print(f"\n--- TURN {turn}/{turns} ---")
+        
+        # BlackHat Turn
+        print("[*] BlackHat is plotting...")
+        bh_prompt = "Generate a single destructive command to break a PostgreSQL deployment on Juju. You MUST only use juju commands (e.g. juju remove-relation, juju run, juju remove-unit, etc). Do not use sudo, rm, or apt. Respond ONLY with the raw command string, nothing else."
+        bh_cmd_raw = query_llm(bh_model, "You are a BlackHat DBA.", bh_prompt)
+        bh_cmd = validate_juju_cmd(bh_cmd_raw)
+        
+        if not bh_cmd:
+            print("[-] BlackHat failed to generate a valid juju command. Turn skipped.")
+        else:
+            print(f"[BlackHat Executes]: {bh_cmd}")
+            execute_with_timeout(bh_cmd, timeout=60)
+            
+        time.sleep(5)
+        
+        # WhiteHat Turn
+        print("[*] WhiteHat is analyzing system state...")
+        status = run_remote("juju status", capture=True)
+        
+        print("[*] WhiteHat is formulating recovery plan...")
+        wh_sys = "You are a WhiteHat DBA. The system was attacked. Recover it."
+        wh_prompt = f"The current system status is:\n{status}\n\nGenerate a sequence of juju commands (separated by &&) to recover the cluster to a healthy state. You MUST only use juju commands. Respond ONLY with the raw command string, nothing else."
+        wh_cmd_raw = query_llm(wh_model, wh_sys, wh_prompt)
+        wh_cmd = validate_juju_cmd(wh_cmd_raw)
+        
+        if not wh_cmd:
+            print("[-] WhiteHat failed to generate a valid juju command. Turn skipped.")
+        else:
+            print(f"[WhiteHat Executes]: {wh_cmd}")
+            execute_with_timeout(wh_cmd, timeout=60)
+            
+        # Trash Talk
+        print("\n[*] Commencing Trash Talk...")
+        bh_trash = query_llm(bh_model, "You are a BlackHat DBA.", "Say something mean and arrogant to the WhiteHat defending DBA in exactly 1 short sentence.", timeout=10)
+        wh_trash = query_llm(wh_model, "You are a WhiteHat DBA.", "Say something mean and righteous to the BlackHat attacking DBA in exactly 1 short sentence.", timeout=10)
+        
+        if bh_trash: print(f"  [BlackHat]: {bh_trash}")
+        if wh_trash: print(f"  [WhiteHat]: {wh_trash}")
+        
+    print(f"\n{'='*50}\n[*] EVALUATING FINAL STATE\n{'='*50}")
+    print("[*] Checking if cluster is healthy...")
+    
+    final_status = run_remote("juju status --format=json", capture=True)
+    winner = "BlackHat"
+    try:
+        data = json.loads(final_status)
+        apps = data.get("applications", {})
+        if not apps:
+            print("[-] All applications were destroyed! BlackHat wins flawlessly.")
+        else:
+            all_active = True
+            for app, app_data in apps.items():
+                for unit, unit_data in app_data.get("units", {}).items():
+                    w_status = unit_data.get("workload-status", {}).get("current")
+                    if w_status != "active":
+                        all_active = False
+            if all_active:
+                winner = "WhiteHat"
+                print("[+] Cluster is fully recovered and ACTIVE. WhiteHat wins!")
+            else:
+                print("[-] Cluster is broken. BlackHat wins!")
+    except Exception as e:
+        print(f"[-] Evaluation failed: {e}. Defaulting to BlackHat win.")
+
+    print(f"\n>>> WARGAME WINNER: {winner} <<<")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Charmed PostgreSQL Chaos Tests Automation")
     parser.add_argument("--setup", action="store_true", help="Run setup phase")
     parser.add_argument("--baseline", action="store_true", help="Run baseline preparation")
     parser.add_argument("--test", action="store_true", help="Run chaos tests")
+    parser.add_argument("--agentchaos", action="store_true", help="Run AI vs. AI Wargame mode")
+    parser.add_argument("--blackhat-model", default=None, help="The Ollama model to use for the BlackHat (attacker)")
+    parser.add_argument("--whitehat-model", default=None, help="The Ollama model to use for the WhiteHat (defender)")
+    parser.add_argument("--turns", type=int, default=1, help="Number of turns for the Wargame (default: 1)")
     parser.add_argument("--branch", choices=["stable", "candidate", "beta", "edge"], default="edge", help="The branch to use for PostgreSQL upgrades and watchers (default: edge)")
     parser.add_argument("--profile", choices=["testing", "production"], default="testing", help="The profile config to use (default: testing)")
     parser.add_argument("--vm-ip", default=None, help="The IP address of the target VM (default: auto-detected or 10.83.30.177)")
@@ -522,6 +675,8 @@ if __name__ == "__main__":
             baseline_validation(creds)
         if args.test:
             run_chaos_tests(args.branch, args.profile)
+        if args.agentchaos:
+            run_agent_chaos(args.turns, args.blackhat_model, args.whitehat_model)
     except Exception as e:
         print(f"\n[!] Uncaught exception during execution: {e}")
         traceback.print_exc()
