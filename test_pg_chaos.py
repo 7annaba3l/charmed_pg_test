@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 import subprocess
 import time
-import argparse
+import subprocess
+import json
 import re
 import sys
+import os
+import datetime
+import traceback
+import argparse
 
 SSH_CMD = []
 TMUX_SESSION = "pg_tests"
@@ -66,6 +71,79 @@ def set_globals(vm_ip, load_time):
     global SSH_CMD, SYSBENCH_TIME
     SSH_CMD = ["ssh", "-o", "StrictHostKeyChecking=no", "-i", "~/.ssh/id_ed25519_antigravity", f"ubuntu@{vm_ip}"]
     SYSBENCH_TIME = load_time
+
+def spawn_vm(vm_name, cpus, ram, disk, ssh_pub_key_path):
+    print(f"[*] Spawning LXD VM '{vm_name}'...")
+    pub_key_path = os.path.expanduser(ssh_pub_key_path)
+    if not os.path.exists(pub_key_path):
+        raise FileNotFoundError(f"SSH public key not found at {pub_key_path}")
+    with open(pub_key_path, "r") as f:
+        pub_key = f.read().strip()
+    
+    cloud_init = f"#cloud-config\nssh_authorized_keys:\n  - {pub_key}\n"
+    
+    cmd_init = ["lxc", "init", "ubuntu:24.04", vm_name, "--vm", "-c", f"limits.cpu={cpus}", "-c", f"limits.memory={ram}", "-d", f"root,size={disk}"]
+    print(f"    Running: {' '.join(cmd_init)}")
+    subprocess.check_call(cmd_init)
+    
+    subprocess.check_call(["lxc", "config", "set", vm_name, "user.user-data", cloud_init])
+    subprocess.check_call(["lxc", "start", vm_name])
+    
+    print(f"[*] Waiting for {vm_name} to get an IPv4 address...")
+    while True:
+        try:
+            output = subprocess.check_output(["lxc", "list", vm_name, "-c", "4", "--format", "csv"], text=True, stderr=subprocess.DEVNULL)
+            match = re.search(r"(\d+\.\d+\.\d+\.\d+)", output)
+            if match:
+                vm_ip = match.group(1)
+                break
+        except subprocess.CalledProcessError:
+            pass
+        time.sleep(2)
+        
+    print(f"[*] VM {vm_name} is running at {vm_ip}. Waiting for SSH...")
+    ssh_check = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2", "-i", "~/.ssh/id_ed25519_antigravity", f"ubuntu@{vm_ip}", "echo", "SSH is up"]
+    while True:
+        try:
+            subprocess.check_output(ssh_check, stderr=subprocess.DEVNULL)
+            break
+        except subprocess.CalledProcessError:
+            time.sleep(2)
+            
+    print("[+] VM is fully ready and SSH is accessible.")
+    return vm_ip
+
+def collect_logs():
+    """Collect debug logs and raft data upon failure."""
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = f"failure_logs_{timestamp}"
+    
+    print(f"\n[!] Triggering log collection into ~/{log_dir} on the remote VM...")
+    run_remote(f"mkdir -p ~/{log_dir}")
+    
+    try:
+        run_remote(f"juju debug-log -m site1 --replay > ~/{log_dir}/site1_debug.log || true")
+        run_remote(f"juju debug-log -m site2 --replay > ~/{log_dir}/site2_debug.log || true")
+        run_remote(f"juju status -m site1 > ~/{log_dir}/site1_status.txt || true")
+        run_remote(f"juju status -m site2 > ~/{log_dir}/site2_status.txt || true")
+        
+        archive_cmd = "sudo tar -czf /tmp/pg_logs.tar.gz /var/snap/charmed-postgresql/common/var/log/ /var/snap/charmed-postgresql/common/patroni/raft || true"
+        
+        for site, app in [("site1", "db1"), ("site2", "db2")]:
+            status_out = run_remote(f"juju status -m {site} {app} --format=json || true")
+            try:
+                status_json = json.loads(status_out)
+                units = status_json.get("applications", {}).get(app, {}).get("units", {}).keys()
+                for unit in units:
+                    safe_unit = unit.replace('/', '_')
+                    run_remote(f"juju ssh -m {site} {unit} '{archive_cmd}'")
+                    run_remote(f"juju scp -m {site} {unit}:/tmp/pg_logs.tar.gz ~/{log_dir}/{safe_unit}_logs.tar.gz || true")
+            except Exception:
+                pass
+                
+        print(f"[+] Logs successfully archived in ~/{log_dir} on the target VM.")
+    except Exception as e:
+        print(f"[-] Failed to collect logs: {e}")
 
 def run_remote(cmd, capture=True):
     """Run a command synchronously on the remote host."""
@@ -314,24 +392,47 @@ if __name__ == "__main__":
     parser.add_argument("--profile", choices=["testing", "production"], default="testing", help="The profile config to use (default: testing)")
     parser.add_argument("--vm-ip", default=None, help="The IP address of the target VM (default: auto-detected or 10.83.30.177)")
     parser.add_argument("--load-time", type=int, default=137, help="Traffic loading time in seconds for sysbench (default: 137)")
+    parser.add_argument("--spawn-vm", metavar="VM_NAME", help="Provision a new LXD VM with the specified name")
+    parser.add_argument("--cpus", default="8", help="Number of CPUs for the spawned VM (default: 8)")
+    parser.add_argument("--ram", default="24GB", help="RAM for the spawned VM (default: 24GB)")
+    parser.add_argument("--disk", default="64GiB", help="Disk size for the spawned VM (default: 64GiB)")
+    parser.add_argument("--ssh-pub-key", default="~/.ssh/id_ed25519_antigravity.pub", help="Path to SSH public key to inject into spawned VM")
+    parser.add_argument("--collect-logs", action="store_true", help="Manually collect Juju and PostgreSQL logs from the target VM")
     args = parser.parse_args()
 
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
 
-    if args.vm_ip is None:
+    if args.spawn_vm:
+        new_ip = spawn_vm(args.spawn_vm, args.cpus, args.ram, args.disk, args.ssh_pub_key)
+        args.vm_ip = new_ip
+    elif args.vm_ip is None:
         args.vm_ip = detect_vm_ip() or "10.83.30.177"
         print(f"Using VM IP: {args.vm_ip}")
 
     set_globals(args.vm_ip, args.load_time)
 
-    if args.setup:
-        setup_infrastructure(args.profile)
-        wait_for_active("site1", "db1")
-        wait_for_active("site2", "db2")
-    if args.baseline:
-        creds = get_credentials_and_ips()
-        baseline_validation(creds)
-    if args.test:
-        run_chaos_tests(args.branch, args.profile)
+    if args.collect_logs:
+        collect_logs()
+        sys.exit(0)
+
+    try:
+        if args.setup:
+            setup_infrastructure(args.profile)
+            print("[*] Waiting for applications to settle...")
+            # Enable debug logging
+            run_remote("juju model-config -m site1 logging-config='<root>=INFO;unit=DEBUG'")
+            run_remote("juju model-config -m site2 logging-config='<root>=INFO;unit=DEBUG'")
+            wait_for_active("site1", "db1")
+            wait_for_active("site2", "db2")
+        if args.baseline:
+            creds = get_credentials_and_ips()
+            baseline_validation(creds)
+        if args.test:
+            run_chaos_tests(args.branch, args.profile)
+    except Exception as e:
+        print(f"\n[!] Uncaught exception during execution: {e}")
+        traceback.print_exc()
+        collect_logs()
+        sys.exit(1)
