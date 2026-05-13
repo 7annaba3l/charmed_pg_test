@@ -82,17 +82,17 @@ def spawn_vm(vm_name, cpus, ram, disk, ssh_pub_key_path):
     
     cloud_init = f"#cloud-config\nssh_authorized_keys:\n  - {pub_key}\n"
     
-    cmd_init = ["lxc", "init", "ubuntu:24.04", vm_name, "--vm", "-c", f"limits.cpu={cpus}", "-c", f"limits.memory={ram}", "-d", f"root,size={disk}"]
+    cmd_init = ["sudo", "lxc", "init", "ubuntu:24.04", vm_name, "--vm", "-c", f"limits.cpu={cpus}", "-c", f"limits.memory={ram}", "-d", f"root,size={disk}"]
     print(f"    Running: {' '.join(cmd_init)}")
     subprocess.check_call(cmd_init)
     
-    subprocess.check_call(["lxc", "config", "set", vm_name, "user.user-data", cloud_init])
-    subprocess.check_call(["lxc", "start", vm_name])
+    subprocess.check_call(["sudo", "lxc", "config", "set", vm_name, "user.user-data", cloud_init])
+    subprocess.check_call(["sudo", "lxc", "start", vm_name])
     
     print(f"[*] Waiting for {vm_name} to get an IPv4 address...")
     while True:
         try:
-            output = subprocess.check_output(["lxc", "list", vm_name, "-c", "4", "--format", "csv"], text=True, stderr=subprocess.DEVNULL)
+            output = subprocess.check_output(["sudo", "lxc", "list", vm_name, "-c", "4", "--format", "csv"], text=True, stderr=subprocess.DEVNULL)
             match = re.search(r"(\d+\.\d+\.\d+\.\d+)", output)
             if match:
                 vm_ip = match.group(1)
