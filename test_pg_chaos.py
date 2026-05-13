@@ -5,9 +5,14 @@ import argparse
 import re
 import sys
 
-SSH_CMD = ["ssh", "-o", "StrictHostKeyChecking=no", "-i", "~/.ssh/id_ed25519_antigravity", "ubuntu@10.83.30.177"]
+SSH_CMD = []
 TMUX_SESSION = "pg_tests"
 SYSBENCH_TIME = 137
+
+def set_globals(vm_ip, load_time):
+    global SSH_CMD, SYSBENCH_TIME
+    SSH_CMD = ["ssh", "-o", "StrictHostKeyChecking=no", "-i", "~/.ssh/id_ed25519_antigravity", f"ubuntu@{vm_ip}"]
+    SYSBENCH_TIME = load_time
 
 def run_remote(cmd, capture=True):
     """Run a command synchronously on the remote host."""
@@ -254,11 +259,15 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true", help="Run chaos tests")
     parser.add_argument("--branch", choices=["stable", "candidate", "beta", "edge"], default="edge", help="The branch to use for PostgreSQL upgrades and watchers (default: edge)")
     parser.add_argument("--profile", choices=["testing", "production"], default="testing", help="The profile config to use (default: testing)")
+    parser.add_argument("--vm-ip", default="10.83.30.177", help="The IP address of the target VM (default: 10.83.30.177)")
+    parser.add_argument("--load-time", type=int, default=137, help="Traffic loading time in seconds for sysbench (default: 137)")
     args = parser.parse_args()
 
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
+
+    set_globals(args.vm_ip, args.load_time)
 
     if args.setup:
         setup_infrastructure(args.profile)
