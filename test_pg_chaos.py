@@ -32,7 +32,7 @@ def detect_vm_ip():
         pass
 
     try:
-        output = subprocess.check_output(["lxc", "list", "-c", "n4", "--format", "csv"], text=True, stderr=subprocess.DEVNULL)
+        output = subprocess.check_output(["sudo", "lxc", "list", "-c", "n4", "--format", "csv"], text=True, stderr=subprocess.DEVNULL)
         for line in output.splitlines():
             parts = line.split(",")
             if len(parts) >= 2:
