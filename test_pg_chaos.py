@@ -667,7 +667,7 @@ if __name__ == "__main__":
     parser.add_argument("--turns", type=int, default=1, help="Number of turns for the Wargame (default: 1)")
     parser.add_argument("--branch", choices=["stable", "candidate", "beta", "edge"], default="edge", help="The branch to use for PostgreSQL upgrades and watchers (default: edge)")
     parser.add_argument("--profile", choices=["testing", "production"], default="testing", help="The profile config to use (default: testing)")
-    parser.add_argument("--vm-ip", default=None, help="The IP address of the target VM (default: auto-detected or 10.83.30.177)")
+    parser.add_argument("--vm-ip", default=None, help="The IP address of the target VM (default: auto-detected)")
     parser.add_argument("--load-time", type=int, default=137, help="Traffic loading time in seconds for sysbench (default: 137)")
     parser.add_argument("--spawn-vm", metavar="VM_NAME", help="Provision a new LXD VM with the specified name")
     parser.add_argument("--cpus", default="8", help="Number of CPUs for the spawned VM (default: 8)")
@@ -685,7 +685,12 @@ if __name__ == "__main__":
         new_ip = spawn_vm(args.spawn_vm, args.cpus, args.ram, args.disk, args.ssh_pub_key)
         args.vm_ip = new_ip
     elif args.vm_ip is None:
-        args.vm_ip = detect_vm_ip() or "10.83.30.177"
+        detected = detect_vm_ip()
+        if not detected:
+            print("[-] Error: No active PostgreSQL VM was auto-detected, and no --vm-ip was provided.")
+            print("[-] Please use '--spawn-vm <NAME>' to create a new VM, or provide '--vm-ip <IP>' manually.")
+            sys.exit(1)
+        args.vm_ip = detected
         print(f"Using VM IP: {args.vm_ip}")
 
     set_globals(args.vm_ip, args.load_time)
