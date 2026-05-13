@@ -268,10 +268,51 @@ touch ~/setup_done
 def wait_for_active(model_name, app_name=""):
     print(f"Waiting for {app_name} in {model_name} to settle...")
     while True:
-        status = run_remote(f"juju status -m {model_name} --format=json")
-        if status and '"status": "maintenance"' not in status and '"status": "waiting"' not in status and '"status": "allocating"' not in status:
-            print(f"Deployments in {model_name} are active.")
-            break
+        try:
+            status_out = run_remote(f"juju status -m {model_name} --format=json")
+            if not status_out:
+                time.sleep(15)
+                continue
+                
+            status_json = json.loads(status_out)
+            apps = status_json.get("applications", {})
+            
+            if app_name and app_name not in apps:
+                print("Still waiting...")
+                time.sleep(15)
+                continue
+                
+            apps_to_check = [app_name] if app_name else apps.keys()
+            if not apps_to_check:
+                all_active = False
+            else:
+                all_active = True
+                
+            for app in apps_to_check:
+                app_data = apps.get(app, {})
+                units = app_data.get("units", {})
+                if not units:
+                    all_active = False
+                    break
+                    
+                for unit_name, unit_data in units.items():
+                    workload_status = unit_data.get("workload-status", {}).get("current", "unknown")
+                    agent_status = unit_data.get("agent-status", {}).get("current", "unknown")
+                    
+                    if workload_status != "active" or agent_status != "idle":
+                        all_active = False
+                        break
+                        
+                if not all_active:
+                    break
+                    
+            if all_active:
+                print(f"Deployments in {model_name} are fully active and idle.")
+                break
+                
+        except Exception:
+            pass
+            
         print("Still waiting...")
         time.sleep(15)
 
