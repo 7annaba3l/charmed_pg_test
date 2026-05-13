@@ -39,6 +39,13 @@ usage: test_pg_chaos.py [-h] [--setup] [--baseline] [--test]
 - `--baseline`: Creates the `sysbench` test database, provisions tables, and records an initial traffic baseline.
 - `--test`: Runs the chaos engineering suite (Primary node kill, minor/major upgrades) alongside a continuous `sysbench` load to track transaction drops.
 - `--collect-logs`: A standalone action to manually extract Juju trace logs, statuses, and Patroni data from the target VM into a `failure_logs_<TIMESTAMP>` directory.
+- `--agentchaos`: Activates the **AI vs. AI Wargame**. The script acts as a Game Master, pitting a local LLM BlackHat attacker against a WhiteHat defender in a turn-based battle to break and recover the cluster.
+
+### AI Wargame Flags (requires local Ollama on port 11434)
+- `--turns <NUM>`: Number of turns to run the wargame (default: 1).
+- `--model <NAME>`: Symmetric mode. Uses the specified fuzzy-matched model for both attacker and defender.
+- `--blackhat-model <NAME>`: Uses the specified model specifically for the attacker.
+- `--whitehat-model <NAME>`: Uses the specified model specifically for the defender.
 
 ### Provisioning Flags
 - `--spawn-vm <NAME>`: Creates a fresh LXD virtual machine.

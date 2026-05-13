@@ -11,6 +11,7 @@ import traceback
 import argparse
 import urllib.request
 import urllib.error
+import difflib
 
 SSH_CMD = []
 TMUX_SESSION = "pg_tests"
@@ -532,21 +533,52 @@ def execute_with_timeout(cmd, timeout=60):
     except subprocess.CalledProcessError as e:
         print(f"[-] Execution failed with exit code {e.returncode}: {e.stderr.decode('utf-8', errors='ignore').strip() if e.stderr else 'Unknown Error'}")
 
-def run_agent_chaos(turns, blackhat_model, whitehat_model):
+def resolve_model(requested_model, available_models):
+    if not requested_model:
+        return available_models[0]
+    
+    if requested_model in available_models:
+        return requested_model
+        
+    matches = difflib.get_close_matches(requested_model, available_models, n=1, cutoff=0.3)
+    if matches:
+        print(f"[*] Fuzzy matched requested model '{requested_model}' to '{matches[0]}'")
+        return matches[0]
+        
+    for m in available_models:
+        if requested_model.lower() in m.lower():
+            print(f"[*] Substring matched requested model '{requested_model}' to '{m}'")
+            return m
+            
+    print(f"[-] Could not find a match for '{requested_model}'. Falling back to '{available_models[0]}'")
+    return available_models[0]
+
+def run_agent_chaos(turns, model_arg, blackhat_model, whitehat_model):
     print(f"\n{'='*50}\n[*] INITIALIZING AI WARGAME\n{'='*50}")
+    
+    # Pre-flight checks
+    try:
+        run_remote("which juju", capture=True)
+    except Exception:
+        print("[-] Error: 'juju' is not installed on the target VM. Please run with --setup to deploy the environment first.")
+        sys.exit(1)
+        
+    try:
+        run_remote("juju status -m site1", capture=True)
+    except Exception:
+        print("[-] Error: The 'site1' model is not deployed. Please run with --setup to initialize the cluster first.")
+        sys.exit(1)
     
     models = get_ollama_models()
     if not models:
         print("[-] No models found on localhost:11434. Please ensure Ollama is running.")
         sys.exit(1)
         
-    bh_model = blackhat_model if blackhat_model else models[0]
-    wh_model = whitehat_model if whitehat_model else models[0]
+    bh_req = blackhat_model or model_arg
+    wh_req = whitehat_model or model_arg
     
-    if bh_model not in models:
-        print(f"[-] Warning: BlackHat model '{bh_model}' not found in local API.")
-    if wh_model not in models:
-        print(f"[-] Warning: WhiteHat model '{wh_model}' not found in local API.")
+    bh_model = resolve_model(bh_req, models)
+    wh_model = resolve_model(wh_req, models)
         
     print(f"[*] BlackHat Model: {bh_model}")
     print(f"[*] WhiteHat Model: {wh_model}")
@@ -629,6 +661,7 @@ if __name__ == "__main__":
     parser.add_argument("--baseline", action="store_true", help="Run baseline preparation")
     parser.add_argument("--test", action="store_true", help="Run chaos tests")
     parser.add_argument("--agentchaos", action="store_true", help="Run AI vs. AI Wargame mode")
+    parser.add_argument("--model", default=None, help="The Ollama model to use for both attacker and defender (symmetric mode)")
     parser.add_argument("--blackhat-model", default=None, help="The Ollama model to use for the BlackHat (attacker)")
     parser.add_argument("--whitehat-model", default=None, help="The Ollama model to use for the WhiteHat (defender)")
     parser.add_argument("--turns", type=int, default=1, help="Number of turns for the Wargame (default: 1)")
@@ -676,7 +709,7 @@ if __name__ == "__main__":
         if args.test:
             run_chaos_tests(args.branch, args.profile)
         if args.agentchaos:
-            run_agent_chaos(args.turns, args.blackhat_model, args.whitehat_model)
+            run_agent_chaos(args.turns, args.model, args.blackhat_model, args.whitehat_model)
     except Exception as e:
         print(f"\n[!] Uncaught exception during execution: {e}")
         traceback.print_exc()
