@@ -41,7 +41,8 @@ usage: test_pg_chaos.py [-h] [--setup] [--baseline] [--test]
 - `--collect-logs`: A standalone action to manually extract Juju trace logs, statuses, and Patroni data from the target VM into a `failure_logs_<TIMESTAMP>` directory.
 - `--agentchaos`: Activates the **AI vs. AI Wargame**. The script acts as a Game Master, pitting a local LLM BlackHat attacker against a WhiteHat defender in a turn-based battle to break and recover the cluster.
 
-### AI Wargame Flags (requires local Ollama on port 11434)
+### AI Wargame Flags
+- `--ollama-host <IP:PORT>`: IP/DNS and port of the Ollama server (default: `localhost:11434`).
 - `--turns <NUM>`: Number of turns to run the wargame (default: 1).
 - `--model <NAME>`: Symmetric mode. Uses the specified fuzzy-matched model for both attacker and defender.
 - `--blackhat-model <NAME>`: Uses the specified model specifically for the attacker.
@@ -87,15 +88,15 @@ Run a 3-turn Wargame where both the attacker and defender use the exact same mod
 python3 test_pg_chaos.py --agentchaos --turns 3 --model mixtral
 ```
 
-**5. Playing the AI Wargame (Asymmetric Mode)**
-Pit a smaller, faster model (e.g. `llama3`) against a heavy model (e.g. `mixtral`) to see if the heavy model can fix what the fast model breaks.
+**5. Playing the AI Wargame (Asymmetric Mode with Remote Ollama)**
+Pit a smaller, faster model (e.g. `llama3`) against a heavy model (e.g. `mixtral`) running on a remote Ollama server.
 ```bash
-python3 test_pg_chaos.py --agentchaos --turns 5 --blackhat-model llama3 --whitehat-model mixtral
+python3 test_pg_chaos.py --agentchaos --turns 5 --ollama-host 192.168.1.100:11434 --blackhat-model llama3 --whitehat-model mixtral
 ```
 
 ### What to Expect in the Wargame
 1. **Pre-flight**: The script will verify that Juju is installed and `site1` is deployed.
-2. **Wake Up**: It will quietly ping the requested models in Ollama to load them into memory to prevent timeouts.
+2. **Wake Up**: It will quietly ping the requested models on the target Ollama host to load them into memory to prevent timeouts.
 3. **BlackHat Turn**: The attacker will generate a destructive Juju command. If it takes longer than 60 seconds to execute, it is forcefully killed.
 4. **WhiteHat Turn**: The defender is given the current `juju status` and asked to recover. It generates repair commands, which are also bound by a 60s timeout.
 5. **Trash Talk**: Both models will exchange a 1-sentence banter.

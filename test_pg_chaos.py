@@ -480,18 +480,18 @@ def run_chaos_tests(branch, profile):
     test_abrupt_shutdown(creds)
     print("All tests completed.")
 
-def get_ollama_models():
+def get_ollama_models(host):
     try:
-        req = urllib.request.Request("http://localhost:11434/v1/models", method="GET")
+        req = urllib.request.Request(f"http://{host}/v1/models", method="GET")
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
             return [m["id"] for m in data.get("data", [])]
     except Exception as e:
-        print(f"[-] Failed to fetch models from v1/models: {e}")
+        print(f"[-] Failed to fetch models from {host}: {e}")
         return []
 
-def query_llm(model, system_prompt, user_prompt, timeout=120):
-    url = "http://localhost:11434/v1/chat/completions"
+def query_llm(model, system_prompt, user_prompt, host, timeout=120):
+    url = f"http://{host}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
     payload = {
         "model": model,
@@ -556,7 +556,7 @@ def resolve_model(requested_model, available_models):
     print(f"[-] Could not find a match for '{requested_model}'. Falling back to '{available_models[0]}'")
     return available_models[0]
 
-def run_agent_chaos(turns, model_arg, blackhat_model, whitehat_model):
+def run_agent_chaos(turns, model_arg, blackhat_model, whitehat_model, ollama_host):
     print(f"\n{'='*50}\n[*] INITIALIZING AI WARGAME\n{'='*50}")
     
     # Pre-flight checks
@@ -572,9 +572,9 @@ def run_agent_chaos(turns, model_arg, blackhat_model, whitehat_model):
         print("[-] Error: The 'site1' model is not deployed. Please run with --setup to initialize the cluster first.")
         sys.exit(1)
     
-    models = get_ollama_models()
+    models = get_ollama_models(ollama_host)
     if not models:
-        print("[-] No models found on localhost:11434. Please ensure Ollama is running.")
+        print(f"[-] No models found on {ollama_host}. Please ensure Ollama is running.")
         sys.exit(1)
         
     bh_req = blackhat_model or model_arg
@@ -587,8 +587,8 @@ def run_agent_chaos(turns, model_arg, blackhat_model, whitehat_model):
     print(f"[*] WhiteHat Model: {wh_model}")
     
     print("[*] Pre-loading models into memory...")
-    query_llm(bh_model, "You are a helpful assistant.", "Wake up.", timeout=120)
-    query_llm(wh_model, "You are a helpful assistant.", "Wake up.", timeout=120)
+    query_llm(bh_model, "You are a helpful assistant.", "Wake up.", ollama_host, timeout=120)
+    query_llm(wh_model, "You are a helpful assistant.", "Wake up.", ollama_host, timeout=120)
     
     for turn in range(1, turns + 1):
         print(f"\n--- TURN {turn}/{turns} ---")
@@ -596,7 +596,7 @@ def run_agent_chaos(turns, model_arg, blackhat_model, whitehat_model):
         # BlackHat Turn
         print("[*] BlackHat is plotting...")
         bh_prompt = "Generate a single destructive command to break a PostgreSQL deployment on Juju. You MUST only use juju commands (e.g. juju remove-relation, juju run, juju remove-unit, etc). Do not use sudo, rm, or apt. Respond ONLY with the raw command string, nothing else."
-        bh_cmd_raw = query_llm(bh_model, "You are a BlackHat DBA.", bh_prompt)
+        bh_cmd_raw = query_llm(bh_model, "You are a BlackHat DBA.", bh_prompt, ollama_host)
         bh_cmd = validate_juju_cmd(bh_cmd_raw)
         
         if not bh_cmd:
@@ -614,7 +614,7 @@ def run_agent_chaos(turns, model_arg, blackhat_model, whitehat_model):
         print("[*] WhiteHat is formulating recovery plan...")
         wh_sys = "You are a WhiteHat DBA. The system was attacked. Recover it."
         wh_prompt = f"The current system status is:\n{status}\n\nGenerate a sequence of juju commands (separated by &&) to recover the cluster to a healthy state. You MUST only use juju commands. Respond ONLY with the raw command string, nothing else."
-        wh_cmd_raw = query_llm(wh_model, wh_sys, wh_prompt)
+        wh_cmd_raw = query_llm(wh_model, wh_sys, wh_prompt, ollama_host)
         wh_cmd = validate_juju_cmd(wh_cmd_raw)
         
         if not wh_cmd:
@@ -625,8 +625,8 @@ def run_agent_chaos(turns, model_arg, blackhat_model, whitehat_model):
             
         # Trash Talk
         print("\n[*] Commencing Trash Talk...")
-        bh_trash = query_llm(bh_model, "You are a BlackHat DBA.", "Say something mean and arrogant to the WhiteHat defending DBA in exactly 1 short sentence.", timeout=10)
-        wh_trash = query_llm(wh_model, "You are a WhiteHat DBA.", "Say something mean and righteous to the BlackHat attacking DBA in exactly 1 short sentence.", timeout=10)
+        bh_trash = query_llm(bh_model, "You are a BlackHat DBA.", "Say something mean and arrogant to the WhiteHat defending DBA in exactly 1 short sentence.", ollama_host, timeout=10)
+        wh_trash = query_llm(wh_model, "You are a WhiteHat DBA.", "Say something mean and righteous to the BlackHat attacking DBA in exactly 1 short sentence.", ollama_host, timeout=10)
         
         if bh_trash: print(f"  [BlackHat]: {bh_trash}")
         if wh_trash: print(f"  [WhiteHat]: {wh_trash}")
@@ -664,6 +664,7 @@ if __name__ == "__main__":
     parser.add_argument("--baseline", action="store_true", help="Run baseline preparation")
     parser.add_argument("--test", action="store_true", help="Run chaos tests")
     parser.add_argument("--agentchaos", action="store_true", help="Run AI vs. AI Wargame mode")
+    parser.add_argument("--ollama-host", default="localhost:11434", help="IP/DNS and port of the Ollama server (default: localhost:11434)")
     parser.add_argument("--model", default=None, help="The Ollama model to use for both attacker and defender (symmetric mode)")
     parser.add_argument("--blackhat-model", default=None, help="The Ollama model to use for the BlackHat (attacker)")
     parser.add_argument("--whitehat-model", default=None, help="The Ollama model to use for the WhiteHat (defender)")
@@ -728,7 +729,7 @@ if __name__ == "__main__":
         if args.test:
             run_chaos_tests(args.branch, args.profile)
         if args.agentchaos:
-            run_agent_chaos(args.turns, args.model, args.blackhat_model, args.whitehat_model)
+            run_agent_chaos(args.turns, args.model, args.blackhat_model, args.whitehat_model, args.ollama_host)
     except Exception as e:
         print(f"\n[!] Uncaught exception during execution: {e}")
         traceback.print_exc()
