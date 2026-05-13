@@ -154,10 +154,11 @@ def collect_logs():
     except Exception as e:
         print(f"[-] Failed to collect logs: {e}")
 
-def run_remote(cmd, capture=True):
+def run_remote(cmd, capture=True, quiet=False):
     """Run a command synchronously on the remote host."""
     full_cmd = SSH_CMD + [cmd]
-    print(f"--> Executing: {cmd}")
+    if not quiet:
+        print(f"--> Executing: {cmd}")
     
     retries = 3
     for attempt in range(retries):
@@ -165,11 +166,13 @@ def run_remote(cmd, capture=True):
         if result.returncode != 0:
             # 255 is the standard SSH client exit code for connection failures
             if result.returncode == 255 and attempt < retries - 1:
-                print(f"    [SSH] Connection issue (code 255), retrying in 5s... (Attempt {attempt+1}/{retries})")
+                if not quiet:
+                    print(f"    [SSH] Connection issue (code 255), retrying in 5s... (Attempt {attempt+1}/{retries})")
                 time.sleep(5)
                 continue
             
-            print(f"Warning/Error from command: {result.stderr if capture else 'Check output'}")
+            if not quiet:
+                print(f"Warning/Error from command: {result.stderr if capture else 'Check output'}")
             # Raise exception so the script can crash into log collection
             result.check_returncode()
         
@@ -251,14 +254,14 @@ touch ~/setup_done
     while True:
         try:
             # Check if done
-            run_remote("ls ~/setup_done")
+            run_remote("ls ~/setup_done", quiet=True)
             break
         except subprocess.CalledProcessError:
             pass
             
         try:
             # Print latest line of log
-            out = run_remote("tail -n 1 ~/setup.log")
+            out = run_remote("tail -n 1 ~/setup.log", quiet=True)
             if out:
                 print(f"    [setup.sh]: {out}")
         except subprocess.CalledProcessError:
@@ -272,7 +275,7 @@ def wait_for_active(model_name, app_name=""):
     print(f"Waiting for {app_name} in {model_name} to settle...")
     while True:
         try:
-            status_out = run_remote(f"juju status -m {model_name} --format=json")
+            status_out = run_remote(f"juju status -m {model_name} --format=json", quiet=True)
             if not status_out:
                 time.sleep(15)
                 continue
