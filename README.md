@@ -41,6 +41,8 @@ usage: test_pg_chaos.py [-h] [--setup] [--baseline] [--test]
 - `--collect-logs`: A standalone action to manually extract Juju trace logs, statuses, and Patroni data from the target VM into a `failure_logs_<TIMESTAMP>` directory.
 - `--agentchaos`: Activates the **AI vs. AI Wargame**. The script acts as a Game Master, pitting a local LLM BlackHat attacker against a WhiteHat defender in a turn-based battle to break and recover the cluster.
 
+![Agent Chaos Testing](./agent-chaos-testing.png)
+
 ### AI Wargame Flags
 - `--ollama-host <IP:PORT>`: IP/DNS and port of the Ollama server (default: `localhost:11434`).
 - `--turns <NUM>`: Number of turns to run the wargame (default: 1).
