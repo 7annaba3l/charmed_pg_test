@@ -73,21 +73,27 @@ def set_globals(vm_ip, load_time):
     SYSBENCH_TIME = load_time
 
 def spawn_vm(vm_name, cpus, ram, disk, ssh_pub_key_path):
-    print(f"[*] Spawning LXD VM '{vm_name}'...")
-    pub_key_path = os.path.expanduser(ssh_pub_key_path)
-    if not os.path.exists(pub_key_path):
-        raise FileNotFoundError(f"SSH public key not found at {pub_key_path}")
-    with open(pub_key_path, "r") as f:
-        pub_key = f.read().strip()
-    
-    cloud_init = f"#cloud-config\nssh_authorized_keys:\n  - {pub_key}\n"
-    
-    cmd_init = ["sudo", "lxc", "init", "ubuntu:24.04", vm_name, "--vm", "-c", f"limits.cpu={cpus}", "-c", f"limits.memory={ram}", "-d", f"root,size={disk}"]
-    print(f"    Running: {' '.join(cmd_init)}")
-    subprocess.check_call(cmd_init)
-    
-    subprocess.check_call(["sudo", "lxc", "config", "set", vm_name, "user.user-data", cloud_init])
-    subprocess.check_call(["sudo", "lxc", "start", vm_name])
+    print(f"[*] Checking if LXD VM '{vm_name}' exists...")
+    try:
+        subprocess.check_output(["sudo", "lxc", "info", vm_name], stderr=subprocess.DEVNULL)
+        print(f"[*] VM '{vm_name}' already exists. Ensuring it is started...")
+        subprocess.call(["sudo", "lxc", "start", vm_name], stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        print(f"[*] VM '{vm_name}' does not exist. Spawning...")
+        pub_key_path = os.path.expanduser(ssh_pub_key_path)
+        if not os.path.exists(pub_key_path):
+            raise FileNotFoundError(f"SSH public key not found at {pub_key_path}")
+        with open(pub_key_path, "r") as f:
+            pub_key = f.read().strip()
+        
+        cloud_init = f"#cloud-config\nssh_authorized_keys:\n  - {pub_key}\n"
+        
+        cmd_init = ["sudo", "lxc", "init", "ubuntu:24.04", vm_name, "--vm", "-c", f"limits.cpu={cpus}", "-c", f"limits.memory={ram}", "-d", f"root,size={disk}"]
+        print(f"    Running: {' '.join(cmd_init)}")
+        subprocess.check_call(cmd_init)
+        
+        subprocess.check_call(["sudo", "lxc", "config", "set", vm_name, "user.user-data", cloud_init])
+        subprocess.check_call(["sudo", "lxc", "start", vm_name])
     
     print(f"[*] Waiting for {vm_name} to get an IPv4 address...")
     while True:
@@ -149,10 +155,22 @@ def run_remote(cmd, capture=True):
     """Run a command synchronously on the remote host."""
     full_cmd = SSH_CMD + [cmd]
     print(f"--> Executing: {cmd}")
-    result = subprocess.run(full_cmd, text=True, capture_output=capture)
-    if result.returncode != 0:
-        print(f"Warning/Error from command: {result.stderr if capture else 'Check output'}")
-    return result.stdout.strip() if capture else ""
+    
+    retries = 3
+    for attempt in range(retries):
+        result = subprocess.run(full_cmd, text=True, capture_output=capture)
+        if result.returncode != 0:
+            # 255 is the standard SSH client exit code for connection failures
+            if result.returncode == 255 and attempt < retries - 1:
+                print(f"    [SSH] Connection issue (code 255), retrying in 5s... (Attempt {attempt+1}/{retries})")
+                time.sleep(5)
+                continue
+            
+            print(f"Warning/Error from command: {result.stderr if capture else 'Check output'}")
+            # Raise exception so the script can crash into log collection
+            result.check_returncode()
+        
+        return result.stdout.strip() if capture else ""
 
 def init_tmux():
     """Start tmux session if it doesn't exist."""
@@ -186,34 +204,66 @@ def run_sysbench_workloads(creds, test_name):
     print("Workloads started in background.")
 
 def setup_infrastructure(profile):
-    print(f"Setting up infrastructure with profile {profile}...")
-    script = f"""
-    sudo apt -y update && sudo apt -y upgrade
-    sudo snap install juju --channel=3.6/stable
-    sudo snap install lxd --channel=5.21/stable
-    sudo lxd init --auto
-    sudo lxc network set lxdbr0 ipv6.address none
-    sudo iptables -P FORWARD ACCEPT
-    juju bootstrap localhost localhost || true
-    juju add-model site1 || true
-    juju deploy postgresql db1 --channel 16/stable --config profile={profile} --base ubuntu@24.04 || true
-    juju deploy data-integrator di1 --config database-name=testdb --base ubuntu@24.04 || true
-    juju relate db1 di1 || true
-    juju add-unit db1 -n 1 || true
-    juju config db1 synchronous-mode-strict=false
-    juju offer db1:replication-offer replication-offer || true
-    juju add-model site2 || true
-    juju deploy postgresql db2 --channel 16/stable --config profile={profile} --base ubuntu@24.04 || true
-    juju add-unit db2 -n 1 || true
-    juju config db2 synchronous-mode-strict=false
-    sleep 10
-    juju consume site1.replication-offer || true
-    juju integrate replication-offer db2:replication || true
-    sudo apt install -y sysbench postgresql-client
-    """
-    for line in script.strip().split("\n"):
-        if line.strip():
-            run_remote(line.strip(), capture=False)
+    print(f"[*] Setting up infrastructure with profile {profile} in background...")
+    script = f"""#!/bin/bash
+sudo apt -y update && sudo apt -y upgrade
+sudo snap install juju --channel=3.6/stable
+sudo snap install lxd --channel=5.21/stable
+sudo lxd init --auto
+sudo lxc network set lxdbr0 ipv6.address none
+sudo iptables -P FORWARD ACCEPT
+juju bootstrap localhost localhost || true
+juju add-model site1 || true
+juju deploy postgresql db1 --channel 16/stable --config profile={profile} --base ubuntu@24.04 || true
+juju deploy data-integrator di1 --config database-name=testdb --base ubuntu@24.04 || true
+juju relate db1 di1 || true
+juju add-unit db1 -n 1 || true
+juju config db1 synchronous-mode-strict=false
+juju offer db1:replication-offer replication-offer || true
+juju add-model site2 || true
+juju deploy postgresql db2 --channel 16/stable --config profile={profile} --base ubuntu@24.04 || true
+juju add-unit db2 -n 1 || true
+juju config db2 synchronous-mode-strict=false
+sleep 10
+juju consume site1.replication-offer || true
+juju integrate replication-offer db2:replication || true
+sudo apt install -y sysbench postgresql-client
+touch ~/setup_done
+"""
+    
+    # Save script to a local file, then transfer and execute it remotely
+    with open("/tmp/charmed_pg_setup.sh", "w") as f:
+        f.write(script)
+        
+    remote_host = SSH_CMD[-1]
+    subprocess.check_call(["scp", "-o", "StrictHostKeyChecking=no", "-i", "~/.ssh/id_ed25519_antigravity", "/tmp/charmed_pg_setup.sh", f"{remote_host}:~/setup.sh"])
+    
+    run_remote("chmod +x ~/setup.sh")
+    run_remote("rm -f ~/setup_done ~/setup.log")
+    
+    print("[*] Launching setup.sh via nohup (this will safely survive package upgrades)...")
+    run_remote("nohup ~/setup.sh > ~/setup.log 2>&1 &", capture=False)
+    
+    print("[*] Waiting for setup to finish (this might take several minutes)...")
+    while True:
+        try:
+            # Check if done
+            run_remote("ls ~/setup_done")
+            break
+        except subprocess.CalledProcessError:
+            pass
+            
+        try:
+            # Print latest line of log
+            out = run_remote("tail -n 1 ~/setup.log")
+            if out:
+                print(f"    [setup.sh]: {out}")
+        except subprocess.CalledProcessError:
+            pass
+            
+        time.sleep(10)
+        
+    print("[+] Infrastructure setup completed.")
 
 def wait_for_active(model_name, app_name=""):
     print(f"Waiting for {app_name} in {model_name} to settle...")
